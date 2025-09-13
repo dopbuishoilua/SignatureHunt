@@ -1,0 +1,215 @@
+-- GameManager (ServerScriptService) -- FINAL UPGRADED VERSION
+-- ???????????????????????????? ???????????????????????????
+
+--// Services & Modules
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local CelebrityConfig = require(ReplicatedStorage:WaitForChild("CelebrityConfig"))
+
+--// Game Objects & Events
+local DesksFolder = Workspace:WaitForChild("CelebrityDesks")
+local Desks = DesksFolder:GetChildren()
+local CelebrityModelsFolder = ReplicatedStorage:WaitForChild("CelebrityModels")
+local UpdatePlayerStacksEvent = ReplicatedStorage.RemoteEvents.UpdatePlayerStacks
+local ReceiveSignatureEvent = ReplicatedStorage.RemoteEvents.ReceiveSignature -- [[ UPGRADE ]] ????? Event ???????????????
+
+--// Game Configuration
+local ROUND_DURATION = 120
+local POST_ROUND_WAIT = 10 -- [[ UPGRADE ]] ?????????????????????????
+
+--// Runtime Data
+local playerData = {}
+local deskData = {}
+local roundActive = false
+
+-- [[ UPGRADE ]] ????? Module ????? ???????? CombatManager ???????????
+local module = {}
+function module.getPlayerData(player)
+	return playerData[player.UserId]
+end
+-- (??????????????????????)
+
+-- (???????? getStackForTier, updateDeskUI, broadcastUpdate ??????????????)
+local function getStackForTier(tierName) -- ... (???????????????????)
+	if tierName == "Goat" then return 1
+	elseif tierName == "Superstar" then return 5
+	elseif tierName == "Famous" then return 10
+	elseif tierName == "Normal" then return 15
+	end
+	return 0
+end
+local function broadcastUpdate() -- ... (???????????????????)
+	local allPlayerData = playerData
+	local simpleDeskData = {}
+	for desk, data in pairs(deskData) do
+		simpleDeskData[desk.Name] = { CurrentPool = data.CurrentPool }
+	end
+	UpdatePlayerStacksEvent:FireAllClients(allPlayerData, simpleDeskData)
+end
+-- (???????? onPromptTriggered, handlePlayerDeath ??????????????)
+local function onPromptTriggered(desk, player) -- ... (???????????????????)
+	if not roundActive or not player then return end
+	local playerInfo = playerData[player.UserId]
+	if not playerInfo or playerInfo.TargetDesk then return end
+	local deskInfo = deskData[desk]
+	if not deskInfo or not deskInfo.CelebrityTier then return end
+	local stackToTake = getStackForTier(deskInfo.CelebrityTier.Name)
+	if deskInfo.CurrentPool < stackToTake then return end
+	deskInfo.CurrentPool -= stackToTake
+	playerInfo.ChanceStack = stackToTake
+	playerInfo.TargetDesk = desk
+	broadcastUpdate()
+end
+local function handlePlayerDeath(player, killer) -- ... (???????????????????)
+	if not player then return end
+	local playerInfo = playerData[player.UserId]
+	if not playerInfo or playerInfo.ChanceStack == 0 or not playerInfo.TargetDesk then return end
+	local stackAmount = playerInfo.ChanceStack
+	local desk = playerInfo.TargetDesk
+	if killer and killer:IsA("Player") and killer ~= player then
+		local killerInfo = playerData[killer.UserId]
+		if killerInfo then killerInfo.ChanceStack += stackAmount end
+	else
+		local deskInfo = deskData[desk]
+		if deskInfo then deskInfo.CurrentPool += stackAmount end
+	end
+	playerInfo.ChanceStack = 0
+	playerInfo.TargetDesk = nil
+	broadcastUpdate()
+end
+
+
+-- =================================================================
+-- [[ UPGRADE ]] ???????????????????????????????
+-- =================================================================
+
+--// [[ UPGRADE ]] ????????????????????????
+local function resolveRound()
+	print("--- RESOLVING ROUND ---")
+
+	for desk, dData in pairs(deskData) do
+		local participants = {}
+		for _, pData in pairs(playerData) do
+			if pData.TargetDesk == desk then
+				table.insert(participants, pData)
+			end
+		end
+
+		if #participants == 0 then continue end
+
+		-- ????????? RNG
+		local rngTable, totalChance = {}, 0
+		for _, pData in ipairs(participants) do
+			table.insert(rngTable, {
+				Player = Players:GetPlayerByUserId(pData.UserId),
+				Min = totalChance + 1,
+				Max = totalChance + pData.ChanceStack
+			})
+			totalChance = totalChance + pData.ChanceStack
+		end
+
+		-- ????????????
+		local roll = math.random(1, 100)
+		local winner = nil
+		for _, entry in ipairs(rngTable) do
+			if roll >= entry.Min and roll <= entry.Max then
+				winner = entry.Player
+				break
+			end
+		end
+
+		-- ?????????
+		if winner then
+			local celebrityName = dData.CurrentModel.Name
+			ReceiveSignatureEvent:FireClient(winner, celebrityName)
+			print(winner.Name .. " won the signature of " .. celebrityName .. "!")
+		end
+
+		-- ???????????????
+		for _, pData in ipairs(participants) do
+			local player = Players:GetPlayerByUserId(pData.UserId)
+			if player and player ~= winner and player:FindFirstChild("leaderstats") then
+				player.leaderstats.Coins.Value += pData.ChanceStack
+			end
+		end
+	end
+end
+
+--// ????????: ?????????????????????
+local function startNewRound()
+	print("--- STARTING NEW ROUND ---")
+
+	for _, data in pairs(playerData) do
+		data.ChanceStack = 0
+		data.TargetDesk = nil
+	end
+
+	for _, desk in ipairs(Desks) do
+		local deskInfo = deskData[desk]
+		if deskInfo.CurrentModel then deskInfo.CurrentModel:Destroy() end
+
+		-- [[ UPGRADE ]] ???????????? Tier ??????????????? Chance
+		local randomTierRoll, cumulative, selectedTierInfo = math.random(1, 100), 0, nil
+		for _, tierInfo in ipairs(CelebrityConfig.Tiers) do
+			cumulative = cumulative + tierInfo.Chance
+			if randomTierRoll <= cumulative then
+				selectedTierInfo = tierInfo
+				break
+			end
+		end
+
+		if selectedTierInfo then
+			local celebList = CelebrityConfig.Celebrities[selectedTierInfo.Name]
+			local celebName = celebList[math.random(1, #celebList)]
+			local celebModelTemplate = CelebrityModelsFolder[selectedTierInfo.Name]:FindFirstChild(celebName)
+
+			if celebModelTemplate then
+				local newCeleb = celebModelTemplate:Clone()
+				newCeleb:SetPrimaryPartCFrame(desk.SpawnPart.CFrame)
+				newCeleb.Parent = desk
+
+				deskInfo.CelebrityTier = selectedTierInfo
+				deskInfo.CurrentModel = newCeleb
+				deskInfo.CurrentPool = 100
+			end
+		end
+	end
+
+	roundActive = true
+	broadcastUpdate()
+end
+
+
+--// Setup & Main Loop (???????????????????)
+Players.PlayerAdded:Connect(function(player)
+	playerData[player.UserId] = { ChanceStack = 0, TargetDesk = nil, UserId = player.UserId } -- ???? UserId ???????
+	player.CharacterAdded:Connect(function(character)
+		character:WaitForChild("Humanoid").Died:Connect(function()
+			local killerTag = character.Humanoid:FindFirstChild("creator")
+			handlePlayerDeath(player, killerTag and killerTag.Value)
+		end)
+	end)
+end)
+Players.PlayerRemoving:Connect(function(player)
+	handlePlayerDeath(player, nil)
+	playerData[player.UserId] = nil
+end)
+for _, desk in ipairs(Desks) do
+	deskData[desk] = {}
+	desk.InteractPart:FindFirstChildOfClass("ProximityPrompt").Triggered:Connect(function(player)
+		onPromptTriggered(desk, player)
+	end)
+end
+
+task.spawn(function()
+	while true do
+		startNewRound()
+		task.wait(ROUND_DURATION)
+		roundActive = false
+		resolveRound() -- [[ UPGRADE ]] ????????????????????????
+		task.wait(POST_ROUND_WAIT)
+	end
+end)
+
+return module -- [[ UPGRADE ]] ??????????????? CombatManager ???????????
